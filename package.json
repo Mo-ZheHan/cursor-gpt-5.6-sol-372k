@@ -1,0 +1,42 @@
+{
+  "name": "cursor-gpt-5.6-sol-372k",
+  "description": "Unofficial macOS patcher for using GPT-5.6 Sol with a 372K context window in Cursor.",
+  "version": "0.0.1",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mo-ZheHan/cursor-gpt-5.6-sol-372k.git"
+  },
+  "homepage": "https://github.com/Mo-ZheHan/cursor-gpt-5.6-sol-372k#readme",
+  "bugs": {
+    "url": "https://github.com/Mo-ZheHan/cursor-gpt-5.6-sol-372k/issues"
+  },
+  "keywords": [
+    "cursor",
+    "gpt-5.6-sol",
+    "context-window",
+    "byok"
+  ],
+  "os": [
+    "darwin"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "patch-cursor.js",
+    "README.md",
+    "CHANGELOG.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "check": "node --check patch-cursor.js",
+    "test": "node --test test/*.test.js",
+    "verify": "npm run check && npm test",
+    "patch:install": "node patch-cursor.js install",
+    "patch:status": "node patch-cursor.js status",
+    "pack:dry": "cache=$(mktemp -d \"${TMPDIR:-/tmp}/cursor-372k-pack.XXXXXX\") && trap 'rm -rf \"$cache\"' EXIT && npm pack --dry-run --cache \"$cache\""
+  }
+}

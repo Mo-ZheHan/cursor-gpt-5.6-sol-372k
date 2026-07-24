@@ -10,7 +10,7 @@ const OFFICIAL_APP = '/Applications/Cursor.app';
 const DEFAULT_APP = '/Applications/Cursor 372K.app';
 const MODEL_MARKER = '/* cursor-gpt-5.6-sol-372k:model */';
 const CHECKPOINT_MARKER = '/* cursor-gpt-5.6-sol-372k:checkpoint */';
-const SUMMARY_MARKER = '/* cursor-gpt-5.6-sol-372k:summary */';
+const SUMMARY_MARKER = '/* cursor-gpt-5.6-sol-372k:summary-v4 */';
 const BACKGROUND_SUMMARY_MARKER =
   '/* cursor-gpt-5.6-sol-372k:background-summary */';
 const UI_MARKER = '/* cursor-gpt-5.6-sol-372k:ui */';
@@ -27,6 +27,10 @@ const CONVERSATION_CHECKPOINT =
   /(handleConversationCheckpoint\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)\{if\(\5!==void 0&&\5!==\(\3\.data\._checkpointEpoch\?\?0\)\)return;)(?=const ([A-Za-z_$][\w$]*)=\2\.tokenDetails,)/;
 const SUBMISSION_ENTRY =
   /(async submitChatMaybeAbortCurrent\(([A-Za-z_$][\w$]*),[A-Za-z_$][\w$]*,([A-Za-z_$][\w$]*)\)\{var [A-Za-z_$][\w$]*=\[\];try\{)/;
+const SUBMISSION_PENDING_QUESTIONNAIRE =
+  /[A-Za-z_$][\w$]*\.setAttribute\("pendingQuestionnaire",([A-Za-z_$][\w$]*)\),this\._structuredLogService\.info\("composer","Aborting current chat"/;
+const SUBMISSION_ABORT_STATE =
+  /(if\(([A-Za-z_$][\w$]*)\.bubbleId===void 0\)\{const ([A-Za-z_$][\w$]*)=this\._composerDataService\.getComposerData\(([A-Za-z_$][\w$]*)\);\3&&\(([A-Za-z_$][\w$]*)=\3\.conversationState,this\._composerDataService\.updateComposerBubbleSetStore\(\4,([A-Za-z_$][\w$]*)\.bubbleId,([A-Za-z_$][\w$]*)=>\7\("conversationState",\5\)\)\)\})(?=[A-Za-z_$][\w$]*\.end\(\);)/;
 const BACKGROUND_COMPLETION_DISPATCH =
   /([A-Za-z_$][\w$]*\(\{composerDataHandle:([A-Za-z_$][\w$]*),composerDataService:this\._composerDataService,completions:[A-Za-z_$][\w$]*\}\);try\{)(?=const [A-Za-z_$][\w$]*=this\._composerDataService\.getComposerData\(\2\)\?\.conversationState,)/;
 const COMPOSER_CHAT_SERVICE_TOKEN =
@@ -181,8 +185,13 @@ function alignContextLimit(state, composer) {
 
 function needsSummarization(data) {
   const selected = data?.modelConfig?.selectedModels?.[0];
+  const tokenDetails = data?.conversationState?.tokenDetails;
+  const usedTokens =
+    tokenDetails?.usedTokens || tokenDetails?.breakdown?.totalUsedTokens;
   return (
-    data?.contextUsagePercent >= 90 &&
+    (tokenDetails
+      ? usedTokens >= 372_000 * 0.9
+      : data?.contextUsagePercent >= 90) &&
     selected?.modelId === 'gpt-5.6-sol' &&
     selected.parameters?.some(
       ({ id, value }) => id === 'context' && value === '272k',
@@ -243,8 +252,37 @@ function patchWorkbenchSource(source) {
     (_submission, entry, composerId, options) =>
       `${entry}if(!${options}?.bubbleId){const composer=` +
       `await this._composerDataService.getComposerHandleById(${composerId});` +
-      `if(composer.data.status==="completed"&&${needsSummary}(composer.data))` +
-      `await ${SUMMARY_MARKER}this.triggerManualSummarization(composer)}`,
+      `if(composer.data.status!=="generating"&&` +
+      `${needsSummary}(composer.data))await ` +
+      `${SUMMARY_MARKER}this.triggerManualSummarization(composer)}`,
+  );
+  const [, pendingQuestionnaire] = matchUnique(
+    patched,
+    SUBMISSION_PENDING_QUESTIONNAIRE,
+    'pending questionnaire state',
+  );
+  patched = replaceUnique(
+    patched,
+    SUBMISSION_ABORT_STATE,
+    'chat submission state after abort',
+    (
+      _abortState,
+      abortState,
+      _options,
+      _data,
+      composer,
+      conversationState,
+      humanBubble,
+    ) =>
+      `${abortState}else if(!${pendingQuestionnaire}&&` +
+      `${needsSummary}(${composer}.data)){await ` +
+      `this.triggerManualSummarization(${composer});` +
+      `${conversationState}=${composer}.data.conversationState;` +
+      `this._composerDataService.updateComposerBubbleSetStore(` +
+      `${composer},${humanBubble}.bubbleId,update=>` +
+      `update("conversationState",${conversationState}));` +
+      `this._composerDataService.updateComposerDataSetStore(` +
+      `${composer},update=>update("status","generating"))}`,
   );
   const [, chatServiceToken] = matchUnique(
     patched,
@@ -583,7 +621,9 @@ module.exports = {
   MODEL_CATALOG_NORMALIZATION,
   MODEL_PARAMETER_RESOLUTION,
   OFFICIAL_APP,
+  SUBMISSION_ABORT_STATE,
   SUBMISSION_ENTRY,
+  SUBMISSION_PENDING_QUESTIONNAIRE,
   SUMMARY_MARKER,
   UI_MARKER,
   disableLibraryValidation,

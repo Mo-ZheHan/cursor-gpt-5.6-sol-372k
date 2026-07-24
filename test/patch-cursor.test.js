@@ -16,7 +16,9 @@ const {
   MODEL_CATALOG_NORMALIZATION,
   MODEL_MARKER,
   MODEL_PARAMETER_RESOLUTION,
+  SUBMISSION_ABORT_STATE,
   SUBMISSION_ENTRY,
+  SUBMISSION_PENDING_QUESTIONNAIRE,
   SUMMARY_MARKER,
   UI_MARKER,
   alignContextLimit,
@@ -52,7 +54,34 @@ const MODEL_RESOLUTION =
   'return resolve(model,effective,maxMode)?.parameterValues??[]}';
 const SUBMISSION =
   'async submitChatMaybeAbortCurrent(id,text,options){' +
-  'var disposables=[];try{this.events.push("submit")}' +
+  'var disposables=[];try{' +
+  'const composer=await this._composerDataService.getComposerHandleById(id);' +
+  'this.events.push("precheck");' +
+  'if(options?.blockSubmission){this.events.push("blocked");return}' +
+  'const pendingQuestionnaire=composer.data.pendingQuestionnaire===true;' +
+  'this._composerDataService.updateComposerDataSetStore(' +
+  'composer,update=>update("status","generating"));' +
+  'let humanBubble={bubbleId:"new-message",' +
+  'conversationState:composer.data.conversationState},' +
+  'requestState=composer.data.conversationState;' +
+  'if(options.bubbleId){humanBubble=this._composerDataService.' +
+  'getComposerBubbleUntracked(composer,options.bubbleId);' +
+  'requestState=humanBubble.conversationState;' +
+  'this._composerDataService.updateComposerDataSetStore(' +
+  'composer,update=>update("conversationState",humanBubble.conversationState));' +
+  'this.events.push("rollback")}' +
+  'abortSpan.setAttribute("pendingQuestionnaire",pendingQuestionnaire),' +
+  'this._structuredLogService.info("composer","Aborting current chat");' +
+  'this.events.push("abort");' +
+  'if(options.bubbleId===void 0){const current=' +
+  'this._composerDataService.getComposerData(composer);' +
+  'current&&(requestState=current.conversationState,' +
+  'this._composerDataService.updateComposerBubbleSetStore(' +
+  'composer,humanBubble.bubbleId,' +
+  'update=>update("conversationState",requestState)))}abortSpan.end();' +
+  'this.requestState=requestState;' +
+  'this.statusAtStream=composer.data.status;' +
+  'this.events.push("submit")}' +
   'finally{}}';
 const BACKGROUND_COMPLETION =
   'async _maybeDispatchBackgroundCompletions(id){' +
@@ -79,11 +108,15 @@ const SETTLED =
 function workbenchSource() {
   return (
     CHAT_SERVICE_TOKEN +
+    'const abortSpan={setAttribute(){},end(){}};' +
     'function prepare(){}' +
     'class ComposerChatService{' +
     'async triggerManualSummarization(composer){' +
     'this.events.push("summarize");' +
-    'composer.data.contextUsagePercent=0}' +
+    'composer.data.conversationState=composer.data.afterSummaryState??' +
+    'composer.data.conversationState;' +
+    'composer.data.contextUsagePercent=0;' +
+    'composer.data.status="completed"}' +
     `${SUBMISSION}` +
     `${CHECKPOINT}` +
     `async finish(options,id,span){${SETTLED}this.done=true}` +
@@ -110,6 +143,21 @@ function conversationState(maxTokens = 1_000_000) {
       usedTokens: 371_126,
       maxTokens,
       breakdown: { totalUsedTokens: 340_000, maxTokens },
+    },
+  };
+}
+
+function tokenUsage(usedTokens, totalUsedTokens) {
+  return {
+    conversationState: {
+      tokenDetails: {
+        usedTokens,
+        maxTokens: 372_000,
+        breakdown: {
+          totalUsedTokens,
+          maxTokens: 372_000,
+        },
+      },
     },
   };
 }
@@ -191,13 +239,22 @@ test('aligns checkpoints in the native handler', () => {
 });
 
 test('selects only matching 372K context for summarization', () => {
-  assert.equal(
-    needsSummarization({
+  for (const data of [
+    {
       modelConfig: modelConfig(),
       contextUsagePercent: 90,
-    }),
-    true,
-  );
+    },
+    {
+      modelConfig: modelConfig(),
+      ...tokenUsage(0, 366_328),
+    },
+    {
+      modelConfig: modelConfig(),
+      ...tokenUsage(340_000, 0),
+    },
+  ]) {
+    assert.equal(needsSummarization(data), true);
+  }
   for (const data of [
     {
       modelConfig: modelConfig(),
@@ -211,12 +268,21 @@ test('selects only matching 372K context for summarization', () => {
       modelConfig: modelConfig('gpt-5.6-sol', '1m'),
       contextUsagePercent: 100,
     },
+    {
+      modelConfig: modelConfig(),
+      ...tokenUsage(32_803, 352_998),
+    },
+    {
+      modelConfig: modelConfig(),
+      ...tokenUsage(0, 0),
+      contextUsagePercent: 100,
+    },
   ]) {
     assert.equal(needsSummarization(data), false);
   }
 });
 
-test('finishes native summarization before starting the requested turn', async () => {
+test('summarizes each submission at its native state boundary', async () => {
   const source = patchWorkbenchSource(workbenchSource()).source;
   const sandbox = vm.createContext({ events: [] });
   vm.runInContext(source, sandbox);
@@ -227,28 +293,101 @@ test('finishes native summarization before starting the requested turn', async (
   const composer = {
     data: {
       modelConfig: modelConfig(),
-      status: 'completed',
-      contextUsagePercent: 90,
     },
   };
   sandbox.instance._composerDataService = {
     getComposerHandleById: async () => composer,
+    getComposerData: ({ data }) => data,
+    getComposerBubbleUntracked: ({ data }, bubbleId) => data.bubbles[bubbleId],
+    updateComposerBubbleSetStore: (handle, bubbleId, callback) =>
+      callback((key, value) => {
+        handle.data.bubbles ??= {};
+        handle.data.bubbles[bubbleId] ??= { bubbleId };
+        handle.data.bubbles[bubbleId][key] = value;
+      }),
+    updateComposerDataSetStore: (handle, callback) =>
+      callback((key, value) => {
+        handle.data[key] = value;
+      }),
   };
-  await sandbox.instance.submitChatMaybeAbortCurrent('composer', '', {});
-  assert.deepEqual([...sandbox.events], ['summarize', 'submit']);
+  sandbox.instance._structuredLogService = { info() {} };
+  async function submit(data, options = {}) {
+    sandbox.events.length = 0;
+    composer.data = {
+      modelConfig: modelConfig(),
+      ...data,
+    };
+    await sandbox.instance.submitChatMaybeAbortCurrent('composer', '', options);
+    return [...sandbox.events];
+  }
 
-  sandbox.events.length = 0;
-  await sandbox.instance.submitChatMaybeAbortCurrent(
-    'composer',
-    '',
-    { bubbleId: 'earlier-message' },
+  const measured = { contextUsagePercent: 90 };
+  const persisted = tokenUsage(0, 366_328);
+  for (const data of [
+    { status: 'completed', ...measured },
+    { status: 'aborted', ...persisted },
+    { status: 'aborted', abortReason: 'user', ...persisted },
+  ]) {
+    assert.deepEqual(
+      await submit(data),
+      ['summarize', 'precheck', 'abort', 'submit'],
+    );
+    assert.equal(sandbox.instance.statusAtStream, 'generating');
+  }
+  for (const [data, expected, options] of [
+    [
+      { status: 'generating', ...persisted },
+      ['precheck', 'abort', 'submit'],
+    ],
+    [
+      { status: 'completed', contextUsagePercent: 89.99 },
+      ['precheck', 'abort', 'submit'],
+    ],
+    [
+      { status: 'completed', ...persisted },
+      ['summarize', 'precheck', 'blocked'],
+      { blockSubmission: true },
+    ],
+    [
+      { status: 'completed', pendingQuestionnaire: true, ...persisted },
+      ['summarize', 'precheck', 'abort', 'submit'],
+    ],
+  ]) {
+    assert.deepEqual(await submit(data, options), expected);
+  }
+
+  const beforeSummary = tokenUsage(0, 366_328).conversationState;
+  const afterSummary = tokenUsage(32_803, 352_998).conversationState;
+  const bubble = { bubbleId: 'failed-turn', conversationState: beforeSummary };
+  const bubbleSubmission = {
+    status: 'aborted',
+    contextUsagePercent: 0,
+    conversationState: {},
+    afterSummaryState: afterSummary,
+    bubbles: { [bubble.bubbleId]: bubble },
+  };
+  assert.deepEqual(
+    await submit(bubbleSubmission, { bubbleId: bubble.bubbleId }),
+    ['precheck', 'rollback', 'abort', 'summarize', 'submit'],
   );
-  assert.deepEqual([...sandbox.events], ['submit']);
+  assert.equal(sandbox.instance.requestState, afterSummary);
+  assert.equal(bubble.conversationState, afterSummary);
+  assert.equal(composer.data.status, 'generating');
+  assert.equal(needsSummarization(composer.data), false);
 
-  sandbox.events.length = 0;
-  composer.data.status = 'aborted';
-  await sandbox.instance.submitChatMaybeAbortCurrent('composer', '', {});
-  assert.deepEqual([...sandbox.events], ['submit']);
+  assert.deepEqual(
+    await submit(
+      {
+        ...bubbleSubmission,
+        conversationState: beforeSummary,
+        bubbles: { [bubble.bubbleId]: bubble },
+      },
+      { bubbleId: bubble.bubbleId },
+    ),
+    ['precheck', 'rollback', 'abort', 'submit'],
+  );
+  assert.equal(sandbox.instance.requestState, afterSummary);
+
   assert.equal(source.includes(SETTLED), true);
 });
 
@@ -446,6 +585,21 @@ test('refuses missing, duplicate, and incomplete injection points', () => {
       ),
     /Expected one chat submission entry, found 0/,
   );
+  for (const [missing, error] of [
+    [
+      'abortSpan.setAttribute("pendingQuestionnaire",pendingQuestionnaire),',
+      /Expected one pending questionnaire state, found 0/,
+    ],
+    [
+      'if(options.bubbleId===void 0)',
+      /Expected one chat submission state after abort, found 0/,
+    ],
+  ]) {
+    assert.throws(
+      () => patchWorkbenchSource(workbenchSource().replace(missing, '')),
+      error,
+    );
+  }
   assert.throws(
     () =>
       patchWorkbenchSource(
@@ -505,6 +659,8 @@ test('matches the native workbench shapes', () => {
   assert.match(MODEL_RESOLUTION, MODEL_PARAMETER_RESOLUTION);
   assert.match(CHECKPOINT, CONVERSATION_CHECKPOINT);
   assert.match(SUBMISSION, SUBMISSION_ENTRY);
+  assert.match(SUBMISSION, SUBMISSION_PENDING_QUESTIONNAIRE);
+  assert.match(SUBMISSION, SUBMISSION_ABORT_STATE);
   assert.match(BACKGROUND_COMPLETION, BACKGROUND_COMPLETION_DISPATCH);
   assert.match(workbenchSource(), COMPOSER_CHAT_SERVICE_TOKEN);
   assert.match(MODEL_CATALOG, MODEL_CATALOG_NORMALIZATION);

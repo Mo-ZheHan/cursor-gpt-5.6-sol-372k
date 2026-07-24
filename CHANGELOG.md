@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Base summarization on canonical conversation token details, preferring a
+  nonzero used-token count over the persisted usage breakdown.
+- Summarize bubble retries after Cursor restores their conversation state, then
+  carry the summarized state into the request and saved bubble without changing
+  native retry behavior.
+- Cover near-limit usage, stale post-summary breakdowns, ordinary submissions,
+  and bubble retries with current-workbench regression tests.
+
 ## 0.0.1 - 2026-07-20
 
 - Create a separately signed `Cursor 372K.app` without modifying the official

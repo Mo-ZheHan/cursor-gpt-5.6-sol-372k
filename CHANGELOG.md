@@ -5,10 +5,12 @@
 - Base summarization on canonical conversation token details, preferring a
   nonzero used-token count over the persisted usage breakdown.
 - Summarize bubble retries after Cursor restores their conversation state, then
-  carry the summarized state into the request and saved bubble without changing
-  native retry behavior.
+  carry the summarized state into the request and saved bubble while preserving
+  the active generation identity and native retry behavior.
 - Cover near-limit usage, stale post-summary breakdowns, ordinary submissions,
-  and bubble retries with current-workbench regression tests.
+  and bubble-retry generation lifecycles with current-workbench regression
+  tests.
+- Reject affected v4 installations through a new summarization marker.
 
 ## 0.0.1 - 2026-07-20
 

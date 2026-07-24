@@ -60,7 +60,9 @@ const SUBMISSION =
   'if(options?.blockSubmission){this.events.push("blocked");return}' +
   'const pendingQuestionnaire=composer.data.pendingQuestionnaire===true;' +
   'this._composerDataService.updateComposerDataSetStore(' +
-  'composer,update=>update("status","generating"));' +
+  'composer,update=>{update("status","generating");' +
+  'update("chatGenerationUUID","current-generation");' +
+  'update("latestChatGenerationUUID","current-generation")});' +
   'let humanBubble={bubbleId:"new-message",' +
   'conversationState:composer.data.conversationState},' +
   'requestState=composer.data.conversationState;' +
@@ -81,6 +83,7 @@ const SUBMISSION =
   'update=>update("conversationState",requestState)))}abortSpan.end();' +
   'this.requestState=requestState;' +
   'this.statusAtStream=composer.data.status;' +
+  'this.generationAtStream=composer.data.chatGenerationUUID;' +
   'this.events.push("submit")}' +
   'finally{}}';
 const BACKGROUND_COMPLETION =
@@ -113,9 +116,12 @@ function workbenchSource() {
     'class ComposerChatService{' +
     'async triggerManualSummarization(composer){' +
     'this.events.push("summarize");' +
+    'composer.data.status="generating";' +
+    'composer.data.chatGenerationUUID="summary-generation";' +
     'composer.data.conversationState=composer.data.afterSummaryState??' +
     'composer.data.conversationState;' +
     'composer.data.contextUsagePercent=0;' +
+    'composer.data.chatGenerationUUID=void 0;' +
     'composer.data.status="completed"}' +
     `${SUBMISSION}` +
     `${CHECKPOINT}` +
@@ -333,6 +339,7 @@ test('summarizes each submission at its native state boundary', async () => {
       ['summarize', 'precheck', 'abort', 'submit'],
     );
     assert.equal(sandbox.instance.statusAtStream, 'generating');
+    assert.equal(sandbox.instance.generationAtStream, 'current-generation');
   }
   for (const [data, expected, options] of [
     [
@@ -373,6 +380,8 @@ test('summarizes each submission at its native state boundary', async () => {
   assert.equal(sandbox.instance.requestState, afterSummary);
   assert.equal(bubble.conversationState, afterSummary);
   assert.equal(composer.data.status, 'generating');
+  assert.equal(composer.data.chatGenerationUUID, 'current-generation');
+  assert.equal(sandbox.instance.generationAtStream, 'current-generation');
   assert.equal(needsSummarization(composer.data), false);
 
   assert.deepEqual(
@@ -387,6 +396,7 @@ test('summarizes each submission at its native state boundary', async () => {
     ['precheck', 'rollback', 'abort', 'submit'],
   );
   assert.equal(sandbox.instance.requestState, afterSummary);
+  assert.equal(sandbox.instance.generationAtStream, 'current-generation');
 
   assert.equal(source.includes(SETTLED), true);
 });
@@ -714,6 +724,13 @@ test('classifies native, patched, and partial application states', (t) => {
 
   writeFixture(patched, patched);
   assert.equal(inspect(appPath).state, 'patched');
+
+  const previous = patched.replace(
+    SUMMARY_MARKER,
+    '/* cursor-gpt-5.6-sol-372k:summary-v4 */',
+  );
+  writeFixture(previous, previous);
+  assert.equal(inspect(appPath).state, 'partial');
 
   writeFixture(patched, `${patched}${UI_MARKER}`);
   assert.equal(inspect(appPath).state, 'partial');

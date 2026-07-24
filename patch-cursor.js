@@ -10,7 +10,7 @@ const OFFICIAL_APP = '/Applications/Cursor.app';
 const DEFAULT_APP = '/Applications/Cursor 372K.app';
 const MODEL_MARKER = '/* cursor-gpt-5.6-sol-372k:model */';
 const CHECKPOINT_MARKER = '/* cursor-gpt-5.6-sol-372k:checkpoint */';
-const SUMMARY_MARKER = '/* cursor-gpt-5.6-sol-372k:summary-v4 */';
+const SUMMARY_MARKER = '/* cursor-gpt-5.6-sol-372k:summary-v5 */';
 const BACKGROUND_SUMMARY_MARKER =
   '/* cursor-gpt-5.6-sol-372k:background-summary */';
 const UI_MARKER = '/* cursor-gpt-5.6-sol-372k:ui */';
@@ -282,7 +282,9 @@ function patchWorkbenchSource(source) {
       `${composer},${humanBubble}.bubbleId,update=>` +
       `update("conversationState",${conversationState}));` +
       `this._composerDataService.updateComposerDataSetStore(` +
-      `${composer},update=>update("status","generating"))}`,
+      `${composer},update=>{update("status","generating");` +
+      `update("chatGenerationUUID",` +
+      `${composer}.data.latestChatGenerationUUID)})}`,
   );
   const [, chatServiceToken] = matchUnique(
     patched,
